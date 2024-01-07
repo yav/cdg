@@ -75,7 +75,8 @@ processFile bs =
           | otherwise ->
           do let s1 = doCommand cmd s
              let t = timeInMilli done
+                 frames = (t - lastSave) `quot` 50
              pure
-               if (t - lastSave) > 50
-                  then (done + 1, t, render s1 : is, s1)
+               if frames > 0
+                  then (done + 1, t, replicate frames (render s1) ++ is, s1)
                   else (done + 1, lastSave, is, s1)

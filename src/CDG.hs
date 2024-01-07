@@ -327,7 +327,7 @@ instance Binary ColorRGB where
        b2 <- getWord8
        let red    = fromIntegral ((b1 `shiftR` 2) .&. 0x0F) * 17
            green  = fromIntegral (((b1 .&. 0x3) `shiftL` 2) .|.
-                                 ((b2 `shiftL` 4) .&. 0x3)) * 17
+                                 ((b2 `shiftR` 4) .&. 0x3)) * 17
            blue   = fromIntegral (b2 .&. 0x0F) * 17
        pure ColorRGB { .. }
 
