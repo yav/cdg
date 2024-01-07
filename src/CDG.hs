@@ -1,44 +1,23 @@
-module CDG where
+module CDG
+  ( Command(..)
+  , ColorRGB(..)
+  , ColorIndex(..), xorColorIndex, zeroColorIndex
+  , ColorTable(..), ansiColors, getColor, setColorLo, setColorHi
+  , Tile(..), Sprite, fillSprite, tileSprite, xorSprite, spriteColorAt
+  , Scroll(..)
+  , ScrollAmt(..)
+  ) where
 
-import Control.Monad(guard,replicateM_, replicateM)
+import Control.Monad(guard,replicateM_, replicateM,when)
 import Data.Binary
 import Data.ByteString(ByteString)
 import Data.ByteString qualified as BS
 import Data.Vector(Vector)
 import Data.Vector qualified as V
+import Numeric(showHex)
 import Data.Bits
 
--- | In bytes
-packetSize :: Int
-packetSize = 24
-
--- | In pixels
-tileWidth :: Int
-tileWidth = 6
-
--- | In pixels
-tileHeight :: Int
-tileHeight = 12
-
--- | In tiles
-screenGridWidth :: Int
-screenGridWidth = 50
-
--- | In tiles
-screenGridHeight :: Int
-screenGridHeight = 18
-
--- | In pixels
-screenFullWidth :: Int
-screenFullWidth = screenGridWidth * tileWidth
-
--- | In pixels
-screenFullHeight :: Int
-screenFullHeight = screenGridHeight * tileHeight
-
-packetsPerSec :: Int
-packetsPerSec = 300
-
+import CDG.Constants
 
 data Command =
     ClearScreen     !ColorIndex !Int
@@ -53,13 +32,89 @@ data Command =
     deriving Show
 
 data ColorRGB       = ColorRGB { red, green, blue :: Int }
-  deriving Show
+
+showByte :: Int -> ShowS
+showByte x
+  | x < 0     = error "negative byte"
+  | x < 16    = ('0' :) . showHex x
+  | otherwise = showHex x
+
+instance Show ColorRGB where
+  showsPrec _ ColorRGB { .. } =
+    ("0x" ++) . showByte red . showByte green . showByte blue
 
 newtype ColorIndex  = ColorIndex Int
-  deriving Show
+  deriving Eq
 
+instance Show ColorIndex where
+  showsPrec p (ColorIndex i) = showsPrec p i
+
+xorColorIndex :: ColorIndex -> ColorIndex -> ColorIndex
+xorColorIndex (ColorIndex x) (ColorIndex y) = ColorIndex (x `xor` y)
+
+zeroColorIndex :: ColorIndex
+zeroColorIndex = ColorIndex 0
+
+--------------------------------------------------------------------------------
 newtype ColorTable  = ColorTable (Vector ColorRGB)
-  deriving Show
+
+instance Show ColorTable where
+  show (ColorTable t) =
+    unlines $
+      [ sep ++ " " ++ show c
+      | (sep,c) <- zip ("[" : repeat ",") (V.toList t)
+      ]
+      ++ [ "]" ]
+
+ansiColors :: ColorTable
+ansiColors = ColorTable (V.fromList colors)
+  where
+  colors =
+    [ ColorRGB 0x00 0x00 0x00
+    , ColorRGB 0x80 0x00 0x00
+    , ColorRGB 0x00 0x80 0x00
+    , ColorRGB 0x80 0x80 0x00
+    , ColorRGB 0x00 0x00 0x80
+    , ColorRGB 0x80 0x00 0x80
+    , ColorRGB 0x00 0x80 0x80
+    , ColorRGB 0xc0 0xc0 0xc0
+
+    , ColorRGB 0x80 0x80 0x80
+    , ColorRGB 0xFF 0x00 0x00
+    , ColorRGB 0x00 0xFF 0x00
+    , ColorRGB 0xFF 0xFF 0x00
+    , ColorRGB 0x00 0x00 0xFF
+    , ColorRGB 0x0FF 0x00 0xFF
+    , ColorRGB 0x00 0xFF 0xFF
+    , ColorRGB 0xFF 0xFF 0xFF
+    ]
+
+
+getColor :: ColorIndex -> ColorTable -> ColorRGB
+getColor (ColorIndex i) (ColorTable t) =
+  case t V.!? i of
+    Just c  -> c
+    Nothing ->
+      error $ unlines
+                [ "Color index out of bounds: " ++ show i
+                , show (ColorTable t)
+                ]
+
+setColorLo :: ColorTable -> ColorTable -> ColorTable
+setColorLo new (ColorTable old) = ColorTable (V.imap upd old)
+  where
+  upd i v
+    | i < 8     = getColor (ColorIndex i) new
+    | otherwise = v
+
+setColorHi :: ColorTable -> ColorTable -> ColorTable
+setColorHi new (ColorTable old) = ColorTable (V.imap upd old)
+  where
+  upd i v
+    | i >= 8    = getColor (ColorIndex (i-8)) new
+    | otherwise = v
+
+--------------------------------------------------------------------------------
 
 data Tile = Tile
   { fg     :: !ColorIndex
@@ -67,13 +122,45 @@ data Tile = Tile
   , row    :: !Int
   , col    :: !Int
   , bitmap :: !ByteString     -- ^ 12 rows, 6 bit/columns
-  } deriving Show
+  }
 
-data ScrollTo = None | Next | Prev
-  deriving Show
+instance Show Tile where
+  show Tile { .. } =
+    unlines $
+      ("{ fg=" ++ show fg ++
+        ", bg=" ++ show bg ++
+        ", xy=" ++ show (col,row) ++ "}"
+      ) :
+      [ [ if b `testBit` i then '*' else '_' | i <- reverse [ 0 .. 5 ] ]
+      | b <- BS.unpack bitmap
+      ]
+
+type Sprite = Vector ColorIndex
+
+fillSprite :: ColorIndex -> Sprite
+fillSprite = V.replicate (tileWidth * tileHeight)
+
+tileSprite :: Tile -> Sprite
+tileSprite tile =
+  V.fromList
+    [ if b `testBit` i then fg tile else bg tile
+    | b <- BS.unpack (bitmap tile)
+    , i <- reverse (take tileWidth [ 0 .. ])
+    ]
+
+xorSprite :: Sprite -> Sprite -> Sprite
+xorSprite = V.zipWith xorColorIndex
+
+spriteColorAt :: Int -> Int -> Sprite -> ColorIndex
+spriteColorAt row col s =
+  case s V.!? (row * tileWidth + col) of
+    Just i  -> i
+    Nothing ->
+      error ("sprite index out of bounds: " ++ show row ++ ", " ++ show col)
+
 
 data ScrollAmt = ScrollAmt
-  { scroll :: !ScrollTo
+  { scroll :: !Int      -- ^ scroll this many tiles
   , offset :: !Int
   } deriving Show
 
@@ -82,7 +169,11 @@ data Scroll = Scroll
   , ver   :: !ScrollAmt
   } deriving Show
 
+
+
+
 --------------------------------------------------------------------------------
+-- Serialization
 
 instance Binary Command where
   put cmd =
@@ -110,9 +201,6 @@ skip n = replicateM_ n getWord8
 
 putExactly :: Binary a => Int -> a -> [a] -> Put
 putExactly want a xs = mapM_ put (take want (xs ++ repeat a))
-
-getWord4 :: Get Int
-getWord4 = fromIntegral . word4 <$> getWord8
 
 getWord6 :: Get Int
 getWord6 = fromIntegral . word6 <$> getWord8
@@ -143,12 +231,12 @@ putCommand cmd =
     ClearScreen ci rpt -> (1,  put ci >> putWord6 rpt >> pad 14)
     ClearBorder ci     -> (2,  put ci >> pad 15)
     SetTile t          -> (6,  put t)
-    XorTile t          -> (20, put t)
-    ScrollColor ci s   -> (24, put ci >> put s >> pad 14)
-    ScrollCopy s       -> (28, pad 1  >> put s >> pad 14)
-    SetTransparent ci  -> (30, put ci >> pad 15)
-    LoadColorsLo t     -> (31, put t)
-    LoadColorsHi t     -> (38, put t)
+    ScrollColor ci s   -> (20, put ci >> put s >> pad 14)
+    ScrollCopy s       -> (24, pad 1  >> put s >> pad 14)
+    SetTransparent ci  -> (28, put ci >> pad 15)
+    LoadColorsLo t     -> (30, put t)
+    LoadColorsHi t     -> (31, put t)
+    XorTile t          -> (38, put t)
 
 getCommand :: Int -> Get Command
 getCommand tag =
@@ -156,19 +244,19 @@ getCommand tag =
     1  -> ClearScreen <$> get <*> getWord6 <* skip 14
     2  -> ClearBorder <$> get <* skip 15
     6  -> SetTile <$> get
-    20 -> XorTile <$> get
-    24 -> ScrollColor <$> get <*> get <* skip 14
-    28 -> ScrollCopy  <$> (skip 1 *> get <* skip 14)
-    30 -> SetTransparent <$> get <* skip 15
-    31 -> LoadColorsLo <$> get
-    38 -> LoadColorsHi <$> get
+    20 -> ScrollColor <$> get <*> get <* skip 14
+    24 -> ScrollCopy  <$> (skip 1 *> get <* skip 14)
+    28 -> SetTransparent <$> get <* skip 15
+    30 -> LoadColorsLo <$> get
+    31 -> LoadColorsHi <$> get
+    38 -> XorTile <$> get
     _  -> fail "unknown command"
 
 instance Binary ColorIndex where
   put (ColorIndex i) = putWord4 i
   get =
     do n <- getWord6
-       guard (n < 16)
+       when (n >= 16) (error "MALFORMED COLOR INDEX")
        pure (ColorIndex n)
 
 instance Binary Tile where
@@ -183,9 +271,9 @@ instance Binary Tile where
    do bg   <- get
       fg   <- get
       row  <- getWord6
-      guard (row < screenGridHeight)
+      when (row >= screenGridHeight) (error "MALFORMED TILE")
       col  <- getWord6
-      guard (col < screenGridWidth)
+      when (col >= screenGridWidth) (error "MALFORMED TILE 2")
       b    <- replicateM tileHeight getWord8
       pure Tile { bitmap = BS.pack (map word6 b), .. }
 
@@ -199,10 +287,10 @@ instance Binary Scroll where
 putScroll :: Int -> ScrollAmt -> Put
 putScroll lim ScrollAmt { .. } = putWord8 ((upper `shiftL` 4) .|. lower)
     where
-    upper = case scroll of
-              None -> 0
-              Next -> 1
-              Prev -> 2
+    upper = case compare scroll 0 of
+              EQ -> 0
+              GT -> 1
+              LT -> 2
     lower = fromIntegral (clamp 0 lim offset)
 
 
@@ -210,12 +298,12 @@ getScroll :: Int -> Get ScrollAmt
 getScroll lim =
   do b <- getWord8
      scroll <- case (b `shiftR` 4) .&. 0x3 of
-                 0 -> pure None
-                 1 -> pure Next
-                 2 -> pure Prev
-                 _ -> fail "invalid scroll"
+                 0 -> pure 0
+                 1 -> pure 1
+                 2 -> pure (-1)
+                 _ -> error "invalid scroll"
      let offset = fromIntegral (word4 b)
-     guard (offset < lim)
+     when (offset >= lim) (error "invalid scroll 2")
      pure ScrollAmt { .. }
 
 instance Binary ColorTable where
