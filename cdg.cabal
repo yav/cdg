@@ -40,6 +40,7 @@ executable cdg
   import: stuff
   main-is: Main.hs
   build-depends:
-    base, bytestring, binary, cdg, directory, filepath, JuicyPixels
+    base, bytestring, binary, cdg, directory, filepath, JuicyPixels,
+    gloss, gloss-juicy
   hs-source-dirs: app
   default-language: Haskell2010
